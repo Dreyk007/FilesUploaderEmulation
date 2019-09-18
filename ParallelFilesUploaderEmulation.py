@@ -94,9 +94,9 @@ class Uploader:
         """ Метод возвращает текущее состояние аплоадера """
         return self.busy
 
-    @property
-    def result(self):
-        """ Метод возвращает итоговый отчёт о проделанной работе """
+    def _calc_result(self):
+        """ Метод высчитывает результаты обработанных файлов:
+         возвращает списки загруженных, с ошибкой, отмененных файлов """
 
         uploaded = []  # Загруженные файлы
         error = []  # Файлы, которые не удалось загрузить из-за ошибок
@@ -109,6 +109,14 @@ class Uploader:
                 aborted.append(f'Filename: {report.filename}, status: {report.status}')
             else:
                 error.append(f'Filename: {report.filename}, status: {report.status}: {report.error_message}')
+
+        return uploaded, error, aborted
+
+    @property
+    def result(self):
+        """ Метод возвращает итоговый отчёт о проделанной работе """
+
+        uploaded, error, aborted = self._calc_result()
 
         # Просто возвращаем оформленную строку с результатами
         uploaded_joint = '\n'.join(uploaded)
