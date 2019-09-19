@@ -13,12 +13,14 @@ class Report:
         self.status = None
         self.processed_count = None
         self.errors_count = None
+        self.aborted_count = None
         self.error_message = None
 
     @property
     def progress(self):
         """ Метод показывает текущий прогресс """
-        return f'Processed {self.processed_count} of {self.total_count} files with {self.errors_count} errors.'
+        return f'Processed {self.processed_count} of {self.total_count} files with {self.errors_count} errors ' \
+               f'and {self.aborted_count} aborted.'
 
 
 class Uploader:
@@ -30,7 +32,16 @@ class Uploader:
         self.reports_q = reports_q  # Очередь для отчётов
         self.threads_count = threads_count  # Число параллельных потоков
         self.files_to_upload = files_to_upload  # Список файлов для загрузки
+
         self.total_count = len(files_to_upload)  # Количество файлов для загрузки
+        self.processed_count = 0  # Количество обработанных файлов
+        self.uploaded_count = 0  # Количество загруженных файлов
+        self.errors_count = 0  # Количество произошедших ошибок загрузки
+        self.aborted_count = 0  # Количество отменённых загрузок
+
+        self.uploaded_files = []  # Загруженные файлы
+        self.error_files = []  # Файлы, которые не удалось загрузить из-за ошибок
+        self.aborted_files = []  # Файлы, которые не удалось загрузить из-за принудительной остановки
 
         self.worker_time = 0.1  # Время имитации нагрузки (загрузки файла)
         self.error_emulation = False  # Включает имитацию случайных ошибок во время загрузки
@@ -50,10 +61,10 @@ class Uploader:
         start_trigger = Value('i', False)  # Триггер для определения начала работы пула (workaround)
 
         # Создание пула с функцией инициализации и расшаренными переменными
-        pool = Pool(self.threads_count, initializer=init, initargs=(self.total_count,
-                                                                    processed_count,
-                                                                    errors_count,
-                                                                    start_trigger))
+        pool = Pool(self.threads_count, initializer=self._initializer, initargs=(self.total_count,
+                                                                                 processed_count,
+                                                                                 errors_count,
+                                                                                 start_trigger))
         # Задачи для пула принимают файлы для загрузки
         jobs = []
         for file in self.files_to_upload:
@@ -73,14 +84,8 @@ class Uploader:
         self._pool.terminate()  # Останавливаем пул
         self._pool.join()  # Дожидаемся его завершения
 
-        # Вычисляем файлы, который не были загружены из-за принудительной остановки и создаём отчёты для них
-        processed_files = [report.filename for report in self._result]
-        aborted_files = list(set(self.files_to_upload) - set(processed_files))
-        for file in aborted_files:
-            report = Report()
-            report.filename = file
-            report.status = 'aborted'
-            self._result.append(report)
+        self._generate_aborted_reports()  # Создаём отчёты для отменённых файлов
+        self._calc_result()  # Вызываем подсчёт результатов
 
         # Устанавливаем флаги состояния
         self.busy = False
@@ -95,13 +100,24 @@ class Uploader:
         return self.busy
 
     def _calc_result(self):
-        """ Метод высчитывает результаты обработанных файлов:
-         возвращает списки загруженных, с ошибкой, отмененных файлов """
+        """ Метод высчитывает результаты обработанных файлов и сохраняет их в свойства экземпляра """
 
-        uploaded = []  # Загруженные файлы
-        error = []  # Файлы, которые не удалось загрузить из-за ошибок
-        aborted = []  # Файлы, которые не удалось загрузить из-за принудительной остановки
+        for report in self._result:
+            if report.status == 'done':
+                self.uploaded_files.append(report.filename)
+            elif report.status == 'aborted':
+                self.aborted_files.append(report.filename)
+            else:
+                self.error_files.append(report.filename)
+
+    @property
+    def result(self):
+        """ Метод возвращает итоговый отчёт о проделанной работе """
+
         # Получаем и обрабатываем отчёты о работе из переменной с результатами
+        uploaded = []
+        aborted = []
+        error = []
         for report in self._result:
             if report.status == 'done':
                 uploaded.append(f'Filename: {report.filename}, status: {report.status}')
@@ -110,18 +126,10 @@ class Uploader:
             else:
                 error.append(f'Filename: {report.filename}, status: {report.status}: {report.error_message}')
 
-        return uploaded, error, aborted
-
-    @property
-    def result(self):
-        """ Метод возвращает итоговый отчёт о проделанной работе """
-
-        uploaded, error, aborted = self._calc_result()
-
         # Просто возвращаем оформленную строку с результатами
         uploaded_joint = '\n'.join(uploaded)
-        error_joint = '\n'.join(error)
-        aborted_joint = '\n'.join(aborted)
+        error_joint = '\n'.join(aborted)
+        aborted_joint = '\n'.join(error)
 
         result = f"\nTotal results:" \
                  f"\n{'-' * 3}" \
@@ -130,13 +138,13 @@ class Uploader:
                  f"\nNot uploaded files:\n{error_joint}\n{aborted_joint}" \
                  f"\n{'-' * 3}" \
                  f"\nTotal files: {self.total_count}" \
-                 f"\nDone: {len(uploaded)}" \
-                 f"\nErrors: {len(error)}" \
-                 f"\nAborted: {len(aborted)}\n"
+                 f"\nDone: {self.uploaded_count}" \
+                 f"\nErrors: {self.errors_count}" \
+                 f"\nAborted: {self.aborted_count}\n"
 
         if self.terminated:
             result = '\nWARNING: ABORTED!\n' + result
-        elif len(error):
+        elif self.errors_count:
             result = '\nWARNING: ERRORS!\n' + result
         else:
             result = '\nSuccessfully Completed\n' + result
@@ -160,6 +168,7 @@ class Uploader:
         report = Report()
         report.filename = file
         report.total_count = TOTAL_COUNT
+        report.aborted_count = 0
         report.status = 'uploading'
 
         try:
@@ -207,21 +216,50 @@ class Uploader:
     def _done(self, report):
         """ Callback-функция для получения результатов """
         self._result.append(report)  # Сохраняем результат в общий список
+
+        # Обновляем счётчики
+        self.processed_count += 1
+        if report.status == 'done':
+            self.uploaded_count += 1
+        else:
+            self.errors_count += 1
+
         if len(self._result) == self.total_count:  # Проверяем: не закончилась ли работа пула
+            self._calc_result()  # Вызываем подсчёт результатов
             self.busy = False
 
+    def _generate_aborted_reports(self):
+        """ Метод генерирует репорты для отменённых файлов """
 
-def init(total_count, processed_count, errors_count, start_trigger):
-    """ Функция-инициализатор для пула: расшаривает общие переменные между процессами """
-    global TOTAL_COUNT
-    global PROCESSED_COUNT
-    global ERRORS_COUNT
-    global START_TRIGGER
+        # Вычисляем файлы, которые не были загружены из-за принудительной остановки и создаём отчёты для них
+        processed_files = [report.filename for report in self._result]
+        aborted_files = list(set(self.files_to_upload) - set(processed_files))
+        self.aborted_count = len(aborted_files)
 
-    TOTAL_COUNT = total_count
-    PROCESSED_COUNT = processed_count
-    ERRORS_COUNT = errors_count
-    START_TRIGGER = start_trigger
+        for file in aborted_files:
+            report = Report()
+            report.filename = file
+            report.status = 'aborted'
+            report.total_count = self.total_count
+            report.processed_count = self.processed_count
+            report.errors_count = self.errors_count
+            report.aborted_count = self.aborted_count
+
+            self.reports_q.put(report)
+            self._result.append(report)
+
+    @staticmethod
+    def _initializer(total_count, processed_count, errors_count, start_trigger):
+        """ Функция-инициализатор для пула: расшаривает общие переменные между процессами """
+        global TOTAL_COUNT
+        global PROCESSED_COUNT
+        global ERRORS_COUNT
+        global START_TRIGGER
+
+        TOTAL_COUNT = total_count
+        PROCESSED_COUNT = processed_count
+        ERRORS_COUNT = errors_count
+        START_TRIGGER = start_trigger
 
 
 if __name__ == '__main__':
@@ -237,7 +275,7 @@ if __name__ == '__main__':
     uploader.error_emulation = True  # Включаем имитацию случайных ошибок
     uploader.worker_time = 0.5  # Устанавливаем "время загрузки" файлов на сервер
     uploader.start()  # Активируем загрузку
-    # uploader.join()
+    # uploader.join()  # Дожидаемся остановки без отображения прогресса в режиме реального времени
 
     # Проверяем результаты в режиме реального времени
     while uploader.is_active():
@@ -250,6 +288,11 @@ if __name__ == '__main__':
             continue
 
         # Выводим текущие результаты на экран
+        print(f'{progress.filename}: {progress.status}. {progress.progress}')
+
+    # Выводим оставшиеся отчёты
+    while not q.empty():
+        progress = q.get()
         print(f'{progress.filename}: {progress.status}. {progress.progress}')
 
     # Формируем и выводим финальный отчёт о результатах работы
